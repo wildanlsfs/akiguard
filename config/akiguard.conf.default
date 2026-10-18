@@ -1,0 +1,28 @@
+# AkiGuard — konfigurasi. Biasanya diubah lewat menu bar, tapi boleh diedit manual.
+# Daemon membaca ulang file ini setiap 15 detik.
+
+# Aturan utama: limit | discharge | full | off
+#   limit     = charging berhenti di 'limit' %, nyala lagi saat turun 'sail' % di bawahnya
+#   discharge = pakai baterai walau adaptor terpasang sampai 'discharge_to' %, lalu tahan di situ
+#   full      = isi sampai 100%
+#   off       = AkiGuard tidak mengatur apa pun (charging normal)
+mode=limit
+limit=80
+sail=5
+discharge_to=50
+
+# 1 = jika baterai di atas batas (mis. 95% padahal limit 80%), turunkan dulu dengan discharge
+auto_discharge=0
+
+# Top up sementara dari menu bar (jangan diubah manual)
+override=off
+override_until=0
+
+# Jadwal: schedule=HH:MM-HH:MM HARI AKSI [NILAI]
+#   HARI : 1=Sen 2=Sel 3=Rab 4=Kam 5=Jum 6=Sab 7=Min, atau * untuk setiap hari
+#   AKSI : limit | discharge | full | off
+# Jadwal yang lebih atas menang bila tumpang tindih. Boleh melewati tengah malam.
+# Contoh (hapus tanda # untuk mengaktifkan):
+# schedule=05:30-07:30 12345 full
+# schedule=22:00-05:30 * limit 60
+# schedule=12:00-13:00 * discharge 40
