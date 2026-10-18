@@ -168,7 +168,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(infoItem("Baterai \(pct)% · \(state)"))
             let src = s["source"] ?? ""
             menu.addItem(infoItem("Aturan aktif: \(modeLabel(s["mode"] ?? "", Int(s["value"] ?? ""))) (\(src))"))
-            if s["can_discharge"] == "0" { menu.addItem(infoItem("Mac ini tidak mendukung discharge paksa")) }
             if let note = s["note"], !note.isEmpty { menu.addItem(infoItem("Catatan: \(note)")) }
         }
         menu.addItem(.separator())
@@ -188,21 +187,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         limitItem.submenu = limitMenu
         menu.addItem(limitItem)
 
-        // Discharge
-        let disItem = NSMenuItem(title: "Discharge sampai", action: nil, keyEquivalent: "")
-        let disMenu = NSMenu()
-        for v in [30, 40, 50, 60, 70, 80] {
-            disMenu.addItem(ActionItem("\(v)% lalu tahan", checked: mode == "discharge" && dischargeTo == v) { [weak self] in
-                self?.update { $0.set("mode", "discharge"); $0.set("discharge_to", "\(v)") }
+        // Discharge: hanya ditampilkan bila Mac ini mendukungnya (atau status belum diketahui)
+        let canDischarge = s["can_discharge"] != "0"
+        if canDischarge {
+            let disItem = NSMenuItem(title: "Discharge sampai", action: nil, keyEquivalent: "")
+            let disMenu = NSMenu()
+            for v in [30, 40, 50, 60, 70, 80] {
+                disMenu.addItem(ActionItem("\(v)% lalu tahan", checked: mode == "discharge" && dischargeTo == v) { [weak self] in
+                    self?.update { $0.set("mode", "discharge"); $0.set("discharge_to", "\(v)") }
+                })
+            }
+            disItem.submenu = disMenu
+            menu.addItem(disItem)
+
+            let autoDis = config.int("auto_discharge", 0) == 1
+            menu.addItem(ActionItem("Auto-discharge bila di atas batas", checked: autoDis) { [weak self] in
+                self?.update { $0.set("auto_discharge", autoDis ? "0" : "1") }
             })
         }
-        disItem.submenu = disMenu
-        menu.addItem(disItem)
-
-        let autoDis = config.int("auto_discharge", 0) == 1
-        menu.addItem(ActionItem("Auto-discharge bila di atas batas", checked: autoDis) { [weak self] in
-            self?.update { $0.set("auto_discharge", autoDis ? "0" : "1") }
-        })
 
         let sail = config.int("sail", 5)
         let sailItem = NSMenuItem(title: "Sailing (charge lagi bila turun)", action: nil, keyEquivalent: "")
@@ -326,8 +328,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             b.state = i < 5 ? .on : .off
             return b
         }
+        var choices: [(title: String, mode: String)] = [
+            ("Tahan di batas %", "limit"), ("Discharge sampai %", "discharge"),
+            ("Isi penuh 100%", "full"), ("Charging normal", "off"),
+        ]
+        if readStatus()["can_discharge"] == "0" { choices.removeAll { $0.mode == "discharge" } }
         let modePop = NSPopUpButton()
-        modePop.addItems(withTitles: ["Tahan di batas %", "Discharge sampai %", "Isi penuh 100%", "Charging normal"])
+        modePop.addItems(withTitles: choices.map { $0.title })
         let value = NSTextField(string: "80")
         value.widthAnchor.constraint(equalToConstant: 50).isActive = true
 
@@ -357,8 +364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
         }
         let days = checks.enumerated().filter { $0.element.state == .on }.map { "\($0.offset + 1)" }.joined()
-        let modes = ["limit", "discharge", "full", "off"]
-        let m = modes[max(0, modePop.indexOfSelectedItem)]
+        let m = choices[max(0, modePop.indexOfSelectedItem)].mode
         let v = Int(value.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
 
         if days.isEmpty { alert("Jadwal tidak disimpan", "Pilih minimal satu hari."); return }
