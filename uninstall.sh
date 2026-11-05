@@ -1,5 +1,5 @@
 #!/bin/bash
-# AkiGuard uninstaller: menghentikan daemon, mengembalikan charging normal, menghapus file.
+# AkiGuard uninstaller: stops the service, restores normal charging, removes files.
 set -uo pipefail
 LABEL="id.wildan.akiguard"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$LABEL.menu.plist"
@@ -15,4 +15,4 @@ launchctl bootout system "/Library/LaunchDaemons/$LABEL.plist" 2>/dev/null
 rm -f "/Library/LaunchDaemons/$LABEL.plist" /usr/local/bin/akiguard /Library/Logs/AkiGuard.log
 rm -rf "/Library/Application Support/AkiGuard" /Applications/AkiGuard.app
 ROOT
-echo "AkiGuard dihapus. Charging kembali normal (BCLM 100%)."
+echo "AkiGuard removed. Charging is back to normal (BCLM 100%)."

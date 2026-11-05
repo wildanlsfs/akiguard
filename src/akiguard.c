@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "smc.h"
+#include "pro.h"
 
 #define CONF_DIR    "/Library/Application Support/AkiGuard"
 #define CONF_PATH   CONF_DIR "/akiguard.conf"
@@ -81,7 +82,7 @@ static int write_byte(smckey *k, uint8_t v) {
     uint8_t buf[32] = {0};
     buf[0] = v;
     int r = smc_write(k->name, buf, k->size);
-    if (r) logmsg("gagal menulis %s (kode %d)", k->name, r);
+    if (r) logmsg("failed to write %s (code %d)", k->name, r);
     return r == 0;
 }
 
@@ -105,7 +106,7 @@ static void hw_set_bclm(int pct) {
 
 /* -------------------------------------------------------------- baterai */
 
-typedef struct { int ok, pct, ac, charging; } ag_battery_t;
+typedef struct { int ok, pct, ac, charging; int temp_c10, cycles, health; } ag_battery_t;
 
 static int cfnum(CFDictionaryRef d, CFStringRef key) {
     int v = -1;
@@ -114,8 +115,32 @@ static int cfnum(CFDictionaryRef d, CFStringRef key) {
     return v;
 }
 
+static int reg_int(io_service_t svc, CFStringRef key) {
+    int v = -1;
+    CFTypeRef t = IORegistryEntryCreateCFProperty(svc, key, kCFAllocatorDefault, 0);
+    if (t) {
+        if (CFGetTypeID(t) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)t, kCFNumberIntType, &v);
+        CFRelease(t);
+    }
+    return v;
+}
+
+// Temperature (0.1 C), cycle count and health (% of design capacity) from AppleSmartBattery
+static void read_battery_health(ag_battery_t *b) {
+    io_service_t svc = IOServiceGetMatchingService(0, IOServiceMatching("AppleSmartBattery"));
+    if (!svc) return;
+    int t = reg_int(svc, CFSTR("Temperature"));            // 0.01 C
+    if (t > 0) b->temp_c10 = t / 10;
+    b->cycles = reg_int(svc, CFSTR("CycleCount"));
+    int design = reg_int(svc, CFSTR("DesignCapacity"));
+    int raw = reg_int(svc, CFSTR("AppleRawMaxCapacity"));   // Apple Silicon (mAh)
+    if (raw <= 100) raw = reg_int(svc, CFSTR("MaxCapacity")); // Intel (mAh)
+    if (design > 0 && raw > 100) b->health = clampi(raw * 100 / design, 0, 120);
+    IOObjectRelease(svc);
+}
+
 static ag_battery_t read_battery(void) {
-    ag_battery_t b = {0, -1, 0, 0};
+    ag_battery_t b = {0, -1, 0, 0, -1, -1, -1};
     CFTypeRef info = IOPSCopyPowerSourcesInfo();
     if (!info) return b;
     CFArrayRef list = IOPSCopyPowerSourcesList(info);
@@ -138,6 +163,7 @@ static ag_battery_t read_battery(void) {
         CFRelease(list);
     }
     CFRelease(info);
+    read_battery_health(&b);
     return b;
 }
 
@@ -153,6 +179,7 @@ typedef struct {
     int limit, sail, auto_dis, discharge_to;
     agmode ovr; long ovr_until;
     ag_sched_t sched[MAX_SCHED]; int nsched;
+    int heat_protect, heat_limit;   // Pro: pause charging when battery is hot (C)
 } ag_conf_t;
 
 static int parse_mode(const char *s, agmode *m) {
@@ -171,6 +198,7 @@ static void conf_defaults(ag_conf_t *c) {
     memset(c, 0, sizeof *c);
     c->mode = M_LIMIT; c->limit = 80; c->sail = 5; c->auto_dis = 0; c->discharge_to = 50;
     c->ovr = M_OFF; c->ovr_until = 0;
+    c->heat_protect = 0; c->heat_limit = 40;
 }
 
 static void load_conf(ag_conf_t *c) {
@@ -192,6 +220,8 @@ static void load_conf(ag_conf_t *c) {
         else if (!strcmp(k, "discharge_to"))   c->discharge_to = clampi(atoi(v), 20, 100);
         else if (!strcmp(k, "override"))       { if (!parse_mode(v, &c->ovr)) c->ovr = M_OFF; }
         else if (!strcmp(k, "override_until")) c->ovr_until = atol(v);
+        else if (!strcmp(k, "heat_protect"))   c->heat_protect = atoi(v) != 0;
+        else if (!strcmp(k, "heat_limit"))     c->heat_limit = clampi(atoi(v), 30, 50);
         else if (!strcmp(k, "schedule") && c->nsched < MAX_SCHED) {
             int h1, m1, h2, m2, val = -1;
             char days[16] = "", mode[16] = "";
@@ -240,14 +270,14 @@ static ag_policy_t effective_policy(const ag_conf_t *c) {
         if (sched_active(&c->sched[i], &tm)) {
             p.mode = c->sched[i].mode;
             p.value = c->sched[i].value > 0 ? c->sched[i].value : default_value(c, p.mode);
-            snprintf(p.src, sizeof p.src, "jadwal %02d:%02d-%02d:%02d",
+            snprintf(p.src, sizeof p.src, "schedule %02d:%02d-%02d:%02d",
                      c->sched[i].start / 60, c->sched[i].start % 60,
                      c->sched[i].end / 60, c->sched[i].end % 60);
             return p;
         }
     }
     p.mode = c->mode; p.value = default_value(c, c->mode);
-    snprintf(p.src, sizeof p.src, "utama");
+    snprintf(p.src, sizeof p.src, "main");
     return p;
 }
 
@@ -271,6 +301,8 @@ static void write_status(const ag_battery_t *b, const ag_policy_t *p, const char
             st_inhibit == 1, st_adoff == 1, st_bclm);
     fprintf(f, "can_inhibit=%d\ncan_discharge=%d\nhas_bclm=%d\n",
             can_inhibit(), can_discharge(), K_BCLM.present);
+    fprintf(f, "temp_c10=%d\ncycles=%d\nhealth=%d\n", b->temp_c10, b->cycles, b->health);
+    fprintf(f, "pro=%d\n", PRO_BUILD);
     fprintf(f, "note=%s\n", note ? note : "");
     fclose(f);
     chmod(tmp, 0644);
@@ -291,7 +323,7 @@ static void tick(void) {
     int want_inhibit = 0, want_adoff = 0, want_bclm = 100;
 
     if (!b.ok) {
-        note = "baterai tidak terbaca, semua dikembalikan normal";
+        note = "battery unreadable, everything restored to normal";
     } else if (p.mode == M_LIMIT || p.mode == M_DISCHARGE) {
         int n = clampi(p.value, 20, 100);
         int autod = (p.mode == M_DISCHARGE) || p.auto_dis;
@@ -310,7 +342,12 @@ static void tick(void) {
     }
     // M_FULL dan M_OFF: charging normal sampai 100%
 
-    if (b.ok && b.pct <= SAFETY_PCT) { want_inhibit = 0; want_adoff = 0; note = "baterai kritis, pengaman aktif"; }
+    if (b.ok && pro_heat_hold(c.heat_protect, c.heat_limit, b.temp_c10)) {
+        want_inhibit = 1;
+        note = "battery hot, charging paused";
+    }
+
+    if (b.ok && b.pct <= SAFETY_PCT) { want_inhibit = 0; want_adoff = 0; note = "battery critical, safety override on"; }
 
     int changed = want_inhibit != st_inhibit || want_adoff != st_adoff || want_bclm != st_bclm;
     if (changed || force_apply || ++ticks_since_write >= 20) {
@@ -318,9 +355,9 @@ static void tick(void) {
         hw_set_adapter(!want_adoff);
         hw_set_charging(!want_inhibit);
         if (changed)
-            logmsg("baterai %d%% | mode %s %d (%s) -> charging %s, adaptor %s, BCLM %d",
+            logmsg("battery %d%% | mode %s %d (%s) -> charging %s, adapter %s, BCLM %d",
                    b.pct, MODE_NAME[p.mode], p.value, p.src,
-                   want_inhibit ? "DITAHAN" : "normal",
+                   want_inhibit ? "PAUSED" : "normal",
                    want_adoff ? "OFF (discharge)" : "on", want_bclm);
         st_inhibit = want_inhibit; st_adoff = want_adoff; st_bclm = want_bclm;
         ticks_since_write = 0; force_apply = 0;
@@ -339,13 +376,13 @@ static void power_cb(void *refcon, io_service_t svc, natural_t type, void *arg) 
         sleeping = 1;
         hw_set_adapter(1);
         st_adoff = 0;
-        logmsg("sistem akan sleep: adaptor dinyalakan kembali");
+        logmsg("system going to sleep: adapter re-enabled");
         IOAllowPowerChange(pm_root, (long)arg);
         break;
     case kIOMessageSystemHasPoweredOn:
         sleeping = 0;
         force_apply = 1;
-        logmsg("sistem bangun dari sleep");
+        logmsg("system woke from sleep");
         tick();
         break;
     default:
@@ -360,15 +397,15 @@ static void restore_on_exit(int keep_bclm) {
 }
 
 static int run_daemon(void) {
-    if (geteuid() != 0) { fprintf(stderr, "daemon harus jalan sebagai root\n"); return 1; }
-    if (smc_open()) { fprintf(stderr, "tidak bisa membuka AppleSMC\n"); return 1; }
+    if (geteuid() != 0) { fprintf(stderr, "daemon must run as root\n"); return 1; }
+    if (smc_open()) { fprintf(stderr, "cannot open AppleSMC\n"); return 1; }
     mkdir(CONF_DIR, 0755);
     probe_keys();
-    logmsg("AkiGuard mulai. Kunci: BCLM=%d CH0B=%d CH0C=%d CHTE=%d CH0I=%d CHIE=%d",
+    logmsg("AkiGuard started. Keys: BCLM=%d CH0B=%d CH0C=%d CHTE=%d CH0I=%d CHIE=%d",
            K_BCLM.present, K_CH0B.present, K_CH0C.present, K_CHTE.present,
            K_CH0I.present, K_CHIE.present);
     if (!can_inhibit() && !K_BCLM.present)
-        logmsg("PERINGATAN: Mac ini tidak punya kunci untuk membatasi charging");
+        logmsg("WARNING: this Mac has no SMC key to limit charging");
 
     IONotificationPortRef port = NULL;
     io_object_t notifier;
@@ -386,7 +423,7 @@ static int run_daemon(void) {
         dispatch_source_set_event_handler(s, ^{
             // BCLM tetap dipertahankan saat Mac dimatikan supaya batas tetap berlaku
             restore_on_exit(1);
-            logmsg("AkiGuard berhenti: charging & adaptor dikembalikan normal");
+            logmsg("AkiGuard stopped: charging and adapter restored to normal");
             exit(0);
         });
         dispatch_resume(s);
@@ -405,33 +442,33 @@ static int run_daemon(void) {
 /* ------------------------------------------------------------------- CLI */
 
 static int need_root(void) {
-    if (geteuid() != 0) { fprintf(stderr, "perintah ini butuh sudo\n"); return 0; }
+    if (geteuid() != 0) { fprintf(stderr, "this command needs sudo\n"); return 0; }
     return 1;
 }
 
 static int cmd_keys(void) {
-    if (smc_open()) { fprintf(stderr, "tidak bisa membuka AppleSMC\n"); return 1; }
+    if (smc_open()) { fprintf(stderr, "cannot open AppleSMC\n"); return 1; }
     probe_keys();
     for (int i = 0; i < NKEYS; i++)
-        printf("%s  %s%s\n", ALLKEYS[i]->name, ALLKEYS[i]->present ? "ADA" : "-",
+        printf("%s  %s%s\n", ALLKEYS[i]->name, ALLKEYS[i]->present ? "YES" : "-",
                ALLKEYS[i]->present ? "" : "");
-    printf("\nBatasi charging : %s\n", (can_inhibit() || K_BCLM.present) ? "didukung" : "TIDAK didukung");
-    printf("Discharge (adaptor off): %s\n", can_discharge() ? "didukung" : "TIDAK didukung");
+    printf("\nCharge limiting : %s\n", (can_inhibit() || K_BCLM.present) ? "supported" : "NOT supported");
+    printf("Discharge (adapter off): %s\n", can_discharge() ? "supported" : "NOT supported");
     return 0;
 }
 
 static int cmd_status(void) {
     ag_battery_t b = read_battery();
-    if (b.ok) printf("Baterai %d%%, %s, %s\n", b.pct, b.ac ? "adaptor terhubung" : "pakai baterai",
-                     b.charging ? "sedang charging" : "tidak charging");
+    if (b.ok) printf("Battery %d%%, %s, %s\n", b.pct, b.ac ? "plugged in" : "on battery",
+                     b.charging ? "charging" : "not charging");
     FILE *f = fopen(STATUS_PATH, "r");
     if (f) {
-        printf("\nStatus daemon (%s):\n", STATUS_PATH);
+        printf("\nService status (%s):\n", STATUS_PATH);
         char line[256];
         while (fgets(line, sizeof line, f)) printf("  %s", line);
         fclose(f);
     } else {
-        printf("Daemon belum pernah jalan (status belum ada).\n");
+        printf("Service has not run yet (no status file).\n");
     }
     return 0;
 }
@@ -440,7 +477,7 @@ static int cmd_read(const char *key) {
     if (!need_root() || smc_open()) return 1;
     uint8_t buf[32]; uint32_t n = 0;
     int r = smc_read(key, buf, &n);
-    if (r) { fprintf(stderr, "gagal membaca %s (kode %d)\n", key, r); return 1; }
+    if (r) { fprintf(stderr, "failed to read %s (code %d)\n", key, r); return 1; }
     printf("%s =", key);
     for (uint32_t i = 0; i < n; i++) printf(" %02x", buf[i]);
     printf("\n");
@@ -451,14 +488,14 @@ static int cmd_write(const char *key, const char *hex) {
     if (!need_root() || smc_open()) return 1;
     uint8_t buf[32]; uint32_t n = 0;
     size_t len = strlen(hex);
-    if (len % 2 || len / 2 > 32) { fprintf(stderr, "HEX tidak valid\n"); return 1; }
+    if (len % 2 || len / 2 > 32) { fprintf(stderr, "invalid HEX\n"); return 1; }
     for (size_t i = 0; i < len; i += 2) {
         unsigned v;
-        if (sscanf(hex + i, "%2x", &v) != 1) { fprintf(stderr, "HEX tidak valid\n"); return 1; }
+        if (sscanf(hex + i, "%2x", &v) != 1) { fprintf(stderr, "invalid HEX\n"); return 1; }
         buf[n++] = (uint8_t)v;
     }
     int r = smc_write(key, buf, n);
-    if (r) { fprintf(stderr, "gagal menulis %s (kode %d; cek ukuran dengan 'read')\n", key, r); return 1; }
+    if (r) { fprintf(stderr, "failed to write %s (code %d; check size with 'read')\n", key, r); return 1; }
     printf("OK\n");
     return 0;
 }
@@ -467,7 +504,7 @@ static int cmd_reset(void) {
     if (!need_root() || smc_open()) return 1;
     probe_keys();
     restore_on_exit(0);
-    printf("Charging, adaptor dan BCLM dikembalikan ke normal.\n");
+    printf("Charging, adapter and BCLM restored to normal.\n");
     return 0;
 }
 
@@ -481,6 +518,6 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "read")  && argc == 3) return cmd_read(argv[2]);
     if (!strcmp(cmd, "write") && argc == 4) return cmd_write(argv[2], argv[3]);
     fprintf(stderr,
-            "Pemakaian: akiguard [status|keys|reset|daemon|read KEY|write KEY HEX]\n");
+            "Usage: akiguard [status|keys|reset|daemon|read KEY|write KEY HEX]\n");
     return 2;
 }

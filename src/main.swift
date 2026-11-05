@@ -1,13 +1,14 @@
-// AkiGuard — aplikasi menu bar. Menulis konfigurasi; daemon root (akiguard) yang mengeksekusi.
+// main.swift: menu bar app entry point (top-level code must live in main.swift when building with Pro/ProStub).
+// AkiGuard — menu bar app. Writes the config file; the root daemon (akiguard) applies it.
 import Cocoa
 
 let confDir = "/Library/Application Support/AkiGuard"
 let confPath = confDir + "/akiguard.conf"
 let statusPath = confDir + "/status"
 let logPath = "/Library/Logs/AkiGuard.log"
-let dayNames = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+let dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-// MARK: - Konfigurasi (format key=value, baris komentar dipertahankan)
+// MARK: - Config (key=value, comment lines preserved)
 
 final class Config {
     private(set) var lines: [String] = []
@@ -76,10 +77,10 @@ func readStatus() -> [String: String] {
 
 func modeLabel(_ mode: String, _ value: Int?) -> String {
     switch mode {
-    case "limit": return "Tahan di \(value ?? 80)%"
-    case "discharge": return "Discharge ke \(value ?? 50)%"
-    case "full": return "Isi penuh 100%"
-    default: return "Charging normal"
+    case "limit": return "Hold at \(value ?? 80)%"
+    case "discharge": return "Discharge to \(value ?? 50)%"
+    case "full": return "Charge to 100%"
+    default: return "Normal charging"
     }
 }
 
@@ -87,15 +88,15 @@ func scheduleLabel(_ s: String) -> String {
     let p = s.split(separator: " ").map(String.init)
     guard p.count >= 3 else { return s }
     let days: String
-    if p[1] == "*" || p[1] == "1234567" { days = "Setiap hari" }
-    else if p[1] == "12345" { days = "Sen–Jum" }
-    else if p[1] == "67" { days = "Sab–Min" }
+    if p[1] == "*" || p[1] == "1234567" { days = "Every day" }
+    else if p[1] == "12345" { days = "Mon–Fri" }
+    else if p[1] == "67" { days = "Sat–Sun" }
     else { days = p[1].compactMap { Int(String($0)) }.filter { (1...7).contains($0) }.map { dayNames[$0 - 1] }.joined(separator: ",") }
     let value = p.count >= 4 ? Int(p[3]) : nil
     return "\(p[0].replacingOccurrences(of: "-", with: "–")) · \(days) · \(modeLabel(p[2], value))"
 }
 
-// MARK: - Item menu dengan closure
+// MARK: - Menu item with closure
 
 final class ActionItem: NSMenuItem {
     private let handler: () -> Void
@@ -106,7 +107,7 @@ final class ActionItem: NSMenuItem {
         state = checked ? .on : .off
         isEnabled = enabled
     }
-    required init(coder: NSCoder) { fatalError("init(coder:) tidak dipakai") }
+    required init(coder: NSCoder) { fatalError("init(coder:) not used") }
     @objc private func fire() { handler() }
 }
 
@@ -116,7 +117,7 @@ func infoItem(_ title: String) -> NSMenuItem {
     return i
 }
 
-// MARK: - Aplikasi
+// MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -131,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         refreshTitle()
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.refreshTitle() }
+        Pro.startBackgroundCheck()
     }
 
     private func refreshTitle() {
@@ -151,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // Menu dibangun ulang setiap kali dibuka, supaya selalu sesuai status terbaru
+    // Menu is rebuilt every time it opens so it always reflects the latest status
     func menuNeedsUpdate(_ menu: NSMenu) {
         config.load()
         let s = readStatus()
@@ -159,16 +161,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let stale = (Double(s["updated"] ?? "") ?? 0) < Date().timeIntervalSince1970 - 90
         if stale {
-            menu.addItem(infoItem("⚠︎ Daemon tidak berjalan — jalankan install.sh lagi"))
+            menu.addItem(infoItem("⚠︎ Background service not running — reinstall AkiGuard"))
         } else {
             let pct = s["pct"] ?? "?"
-            var state = s["charging"] == "1" ? "sedang charging" : (s["ac"] == "1" ? "adaptor terhubung" : "pakai baterai")
-            if s["adapter_disabled"] == "1" { state = "discharge (adaptor dimatikan)" }
-            else if s["charge_inhibited"] == "1" { state = "charging ditahan" }
-            menu.addItem(infoItem("Baterai \(pct)% · \(state)"))
-            let src = s["source"] ?? ""
-            menu.addItem(infoItem("Aturan aktif: \(modeLabel(s["mode"] ?? "", Int(s["value"] ?? ""))) (\(src))"))
-            if let note = s["note"], !note.isEmpty { menu.addItem(infoItem("Catatan: \(note)")) }
+            var state = s["charging"] == "1" ? "charging" : (s["ac"] == "1" ? "plugged in" : "on battery")
+            if s["adapter_disabled"] == "1" { state = "discharging (adapter off)" }
+            else if s["charge_inhibited"] == "1" { state = "charging paused" }
+            menu.addItem(infoItem("Battery \(pct)% · \(state)"))
+            let src = (s["source"] ?? "").replacingOccurrences(of: "utama", with: "main").replacingOccurrences(of: "jadwal", with: "schedule")
+            menu.addItem(infoItem("Active rule: \(modeLabel(s["mode"] ?? "", Int(s["value"] ?? ""))) (\(src))"))
+            if let note = s["note"], !note.isEmpty { menu.addItem(infoItem("Note: \(note)")) }
         }
         menu.addItem(.separator())
 
@@ -176,8 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let limit = config.int("limit", 80)
         let dischargeTo = config.int("discharge_to", 50)
 
-        // Batas charging
-        let limitItem = NSMenuItem(title: "Batas charging", action: nil, keyEquivalent: "")
+        // Charge limit
+        let limitItem = NSMenuItem(title: "Charge limit", action: nil, keyEquivalent: "")
         let limitMenu = NSMenu()
         for v in [50, 60, 70, 75, 80, 85, 90, 95, 100] {
             limitMenu.addItem(ActionItem("\(v)%", checked: mode == "limit" && limit == v) { [weak self] in
@@ -187,13 +189,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         limitItem.submenu = limitMenu
         menu.addItem(limitItem)
 
-        // Discharge: hanya ditampilkan bila Mac ini mendukungnya (atau status belum diketahui)
+        // Discharge: only shown if this Mac supports it (or support is unknown yet)
         let canDischarge = s["can_discharge"] != "0"
         if canDischarge {
-            let disItem = NSMenuItem(title: "Discharge sampai", action: nil, keyEquivalent: "")
+            let disItem = NSMenuItem(title: "Discharge to", action: nil, keyEquivalent: "")
             let disMenu = NSMenu()
             for v in [30, 40, 50, 60, 70, 80] {
-                disMenu.addItem(ActionItem("\(v)% lalu tahan", checked: mode == "discharge" && dischargeTo == v) { [weak self] in
+                disMenu.addItem(ActionItem("\(v)%, then hold", checked: mode == "discharge" && dischargeTo == v) { [weak self] in
                     self?.update { $0.set("mode", "discharge"); $0.set("discharge_to", "\(v)") }
                 })
             }
@@ -201,39 +203,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disItem)
 
             let autoDis = config.int("auto_discharge", 0) == 1
-            menu.addItem(ActionItem("Auto-discharge bila di atas batas", checked: autoDis) { [weak self] in
+            menu.addItem(ActionItem("Auto-discharge when above limit", checked: autoDis) { [weak self] in
                 self?.update { $0.set("auto_discharge", autoDis ? "0" : "1") }
             })
         }
 
         let sail = config.int("sail", 5)
-        let sailItem = NSMenuItem(title: "Sailing (charge lagi bila turun)", action: nil, keyEquivalent: "")
+        let sailItem = NSMenuItem(title: "Sailing (resume charging after drop)", action: nil, keyEquivalent: "")
         let sailMenu = NSMenu()
         for v in [2, 3, 5, 8, 10] {
-            sailMenu.addItem(ActionItem("\(v)% di bawah batas", checked: sail == v) { [weak self] in
+            sailMenu.addItem(ActionItem("\(v)% below limit", checked: sail == v) { [weak self] in
                 self?.update { $0.set("sail", "\(v)") }
             })
         }
         sailItem.submenu = sailMenu
         menu.addItem(sailItem)
 
-        menu.addItem(ActionItem("Pause — charging normal", checked: mode == "off") { [weak self] in
+        menu.addItem(ActionItem("Pause — normal charging", checked: mode == "off") { [weak self] in
             self?.update { $0.set("mode", "off") }
         })
         menu.addItem(.separator())
 
-        // Top up sementara
+        // Temporary top up
         let until = Double(config.get("override_until") ?? "") ?? 0
         let now = Date().timeIntervalSince1970
         if config.get("override") == "full" && until > now {
             let f = DateFormatter(); f.dateFormat = "HH:mm"
-            menu.addItem(infoItem("Top up 100% aktif sampai \(f.string(from: Date(timeIntervalSince1970: until)))"))
-            menu.addItem(ActionItem("Batalkan top up") { [weak self] in
+            menu.addItem(infoItem("Top up to 100% active until \(f.string(from: Date(timeIntervalSince1970: until)))"))
+            menu.addItem(ActionItem("Cancel top up") { [weak self] in
                 self?.update { $0.set("override", "off"); $0.set("override_until", "0") }
             })
         } else {
             for h in [2, 4, 8] {
-                menu.addItem(ActionItem("Top up ke 100% selama \(h) jam") { [weak self] in
+                menu.addItem(ActionItem("Top up to 100% for \(h) hours") { [weak self] in
                     let t = Int(Date().timeIntervalSince1970) + h * 3600
                     self?.update { $0.set("override", "full"); $0.set("override_until", "\(t)") }
                 })
@@ -241,27 +243,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        // Jadwal
-        let schedItem = NSMenuItem(title: "Jadwal", action: nil, keyEquivalent: "")
+        // Schedules
+        let schedItem = NSMenuItem(title: "Schedules", action: nil, keyEquivalent: "")
         let schedMenu = NSMenu()
         schedMenu.autoenablesItems = false
         let list = config.schedules
-        if list.isEmpty { schedMenu.addItem(infoItem("Belum ada jadwal")) }
+        if list.isEmpty { schedMenu.addItem(infoItem("No schedules yet")) }
         for (i, s) in list.enumerated() {
             schedMenu.addItem(ActionItem("✕  " + scheduleLabel(s)) { [weak self] in self?.confirmDelete(i, s) })
         }
         schedMenu.addItem(.separator())
-        schedMenu.addItem(ActionItem("Tambah jadwal…") { [weak self] in self?.addScheduleDialog() })
-        schedMenu.addItem(infoItem("Klik jadwal untuk menghapus. Jadwal teratas menang."))
+        schedMenu.addItem(ActionItem("Add schedule…") { [weak self] in self?.addScheduleDialog() })
+        schedMenu.addItem(infoItem("Click a schedule to delete it. The top one wins."))
         schedItem.submenu = schedMenu
         menu.addItem(schedItem)
 
-        menu.addItem(ActionItem("Edit konfigurasi manual…") {
+        Pro.addMenuItems(menu, config: config, status: s) { [weak self] change in self?.update(change) }
+        menu.addItem(.separator())
+
+        menu.addItem(ActionItem("Edit config file…") {
             self.openWith(["-e", confPath])
         })
-        menu.addItem(ActionItem("Lihat log") { self.openWith(["-a", "Console", logPath]) })
+        menu.addItem(ActionItem("View log") { self.openWith(["-a", "Console", logPath]) })
         menu.addItem(.separator())
-        menu.addItem(ActionItem("Tutup menu bar (daemon tetap jalan)") { NSApp.terminate(nil) })
+        menu.addItem(ActionItem("About AkiGuard") { self.openWith(["https://wildan17.gumroad.com"]) })
+        menu.addItem(ActionItem("Uninstall AkiGuard…") { [weak self] in self?.confirmUninstall() })
+        menu.addItem(ActionItem("Quit menu bar (service keeps running)") { NSApp.terminate(nil) })
+    }
+
+    private func confirmUninstall() {
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Uninstall AkiGuard?"
+        a.informativeText = "This stops the background service, restores normal charging and removes AkiGuard. You will be asked for your admin password."
+        a.addButton(withTitle: "Uninstall")
+        a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        guard let script = Bundle.main.path(forResource: "uninstall", ofType: "sh") else {
+            alert("Uninstall", "Run ./uninstall.sh from the AkiGuard folder you installed from."); return
+        }
+        let src = "do shell script \"/bin/bash '" + script + "' \" & quoted form of (POSIX path of (path to home folder)) with administrator privileges"
+        var err: NSDictionary?
+        NSAppleScript(source: src)?.executeAndReturnError(&err)
+        if err == nil { NSApp.terminate(nil) }
     }
 
     private func openWith(_ args: [String]) {
@@ -277,7 +301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try config.save()
         } catch {
-            alert("Gagal menyimpan konfigurasi", "Folder \(confDir) tidak bisa ditulis. Jalankan install.sh lagi.\n\n\(error.localizedDescription)")
+            alert("Could not save settings", "The folder \(confDir) is not writable. Please reinstall AkiGuard.\n\n\(error.localizedDescription)")
         }
         refreshTitle()
     }
@@ -293,10 +317,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func confirmDelete(_ index: Int, _ s: String) {
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
-        a.messageText = "Hapus jadwal ini?"
+        a.messageText = "Delete this schedule?"
         a.informativeText = scheduleLabel(s)
-        a.addButton(withTitle: "Hapus")
-        a.addButton(withTitle: "Batal")
+        a.addButton(withTitle: "Delete")
+        a.addButton(withTitle: "Cancel")
         if a.runModal() == .alertFirstButtonReturn {
             update { $0.removeSchedule(at: index) }
         }
@@ -329,8 +353,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return b
         }
         var choices: [(title: String, mode: String)] = [
-            ("Tahan di batas %", "limit"), ("Discharge sampai %", "discharge"),
-            ("Isi penuh 100%", "full"), ("Charging normal", "off"),
+            ("Hold at %", "limit"), ("Discharge to %", "discharge"),
+            ("Charge to 100%", "full"), ("Normal charging", "off"),
         ]
         if readStatus()["can_discharge"] == "0" { choices.removeAll { $0.mode == "discharge" } }
         let modePop = NSPopUpButton()
@@ -339,11 +363,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         value.widthAnchor.constraint(equalToConstant: 50).isActive = true
 
         let stack = NSStackView(views: [
-            row("Mulai", [start]),
-            row("Selesai", [end]),
-            row("Hari", checks),
-            row("Aksi", [modePop]),
-            row("Nilai %", [value, NSTextField(labelWithString: "(untuk tahan / discharge)")]),
+            row("Start", [start]),
+            row("End", [end]),
+            row("Days", checks),
+            row("Action", [modePop]),
+            row("Value %", [value, NSTextField(labelWithString: "(for hold / discharge)")]),
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -351,11 +375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stack.frame = NSRect(x: 0, y: 0, width: 470, height: 170)
 
         let a = NSAlert()
-        a.messageText = "Tambah jadwal"
-        a.informativeText = "Selama rentang waktu ini aturan jadwal menggantikan aturan utama. Rentang boleh melewati tengah malam (mis. 22:00–06:00)."
+        a.messageText = "Add schedule"
+        a.informativeText = "During this time window the schedule replaces your main rule. Windows can cross midnight (e.g. 22:00–06:00)."
         a.accessoryView = stack
-        a.addButton(withTitle: "Simpan")
-        a.addButton(withTitle: "Batal")
+        a.addButton(withTitle: "Save")
+        a.addButton(withTitle: "Cancel")
         guard a.runModal() == .alertFirstButtonReturn else { return }
 
         let cal = Calendar.current
@@ -367,10 +391,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let m = choices[max(0, modePop.indexOfSelectedItem)].mode
         let v = Int(value.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
 
-        if days.isEmpty { alert("Jadwal tidak disimpan", "Pilih minimal satu hari."); return }
-        if hm(start.dateValue) == hm(end.dateValue) { alert("Jadwal tidak disimpan", "Jam mulai dan selesai tidak boleh sama."); return }
+        if days.isEmpty { alert("Schedule not saved", "Pick at least one day."); return }
+        if hm(start.dateValue) == hm(end.dateValue) { alert("Schedule not saved", "Start and end time can't be the same."); return }
         if (m == "limit" || m == "discharge") && !(20...100).contains(v) {
-            alert("Jadwal tidak disimpan", "Nilai harus antara 20 dan 100."); return
+            alert("Schedule not saved", "Value must be between 20 and 100."); return
         }
         var line = "\(hm(start.dateValue))-\(hm(end.dateValue)) \(days) \(m)"
         if m == "limit" || m == "discharge" { line += " \(v)" }
