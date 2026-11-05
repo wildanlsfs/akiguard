@@ -1,28 +1,28 @@
-# AkiGuard — konfigurasi. Biasanya diubah lewat menu bar, tapi boleh diedit manual.
-# Daemon membaca ulang file ini setiap 15 detik.
+# AkiGuard settings. Usually changed from the menu bar, but you can edit this file by hand.
+# The background service re-reads it every 15 seconds.
 
-# Aturan utama: limit | discharge | full | off
-#   limit     = charging berhenti di 'limit' %, nyala lagi saat turun 'sail' % di bawahnya
-#   discharge = pakai baterai walau adaptor terpasang sampai 'discharge_to' %, lalu tahan di situ
-#   full      = isi sampai 100%
-#   off       = AkiGuard tidak mengatur apa pun (charging normal)
+# Main rule: limit | discharge | full | off
+#   limit     = stop charging at 'limit' %, resume when it drops 'sail' % below
+#   discharge = run on battery while plugged in until 'discharge_to' %, then hold there
+#   full      = charge to 100%
+#   off       = AkiGuard does nothing (normal charging)
 mode=limit
 limit=80
 sail=5
 discharge_to=50
 
-# 1 = jika baterai di atas batas (mis. 95% padahal limit 80%), turunkan dulu dengan discharge
+# 1 = if the battery is above the limit (e.g. 95% with limit 80%), discharge down to it first
 auto_discharge=0
 
-# Top up sementara dari menu bar (jangan diubah manual)
+# Temporary top up from the menu bar (do not edit by hand)
 override=off
 override_until=0
 
-# Jadwal: schedule=HH:MM-HH:MM HARI AKSI [NILAI]
-#   HARI : 1=Sen 2=Sel 3=Rab 4=Kam 5=Jum 6=Sab 7=Min, atau * untuk setiap hari
-#   AKSI : limit | discharge | full | off
-# Jadwal yang lebih atas menang bila tumpang tindih. Boleh melewati tengah malam.
-# Contoh (hapus tanda # untuk mengaktifkan):
+# Schedules: schedule=HH:MM-HH:MM DAYS ACTION [VALUE]
+#   DAYS   : 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat 7=Sun, or * for every day
+#   ACTION : limit | discharge | full | off
+# The higher schedule wins when they overlap. Windows can cross midnight.
+# Examples (remove the # to enable):
 # schedule=05:30-07:30 12345 full
 # schedule=22:00-05:30 * limit 60
 # schedule=12:00-13:00 * discharge 40

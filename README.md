@@ -1,70 +1,85 @@
 # AkiGuard
 
-Pengatur charging MacBook yang ringan dan open source — alternatif [AlDente](https://apphousekitchen.com/) buatan sendiri.
-Batasi charging, discharge walau charger terpasang, top up sementara, dan **jadwalkan** kapan Mac charging atau discharging.
+A small, open-source battery charge limiter for MacBooks — Intel **and** Apple Silicon.
+Cap charging, run on battery while plugged in, top up to 100% when you need it, and schedule all of it by time and day. Lives in the menu bar.
 
-> *English: AkiGuard is a small open-source battery charge limiter for macOS (Intel & Apple Silicon). It caps charging, forces discharge while plugged in, supports temporary top-ups and time-based schedules, and lives in the menu bar. UI and docs are in Indonesian.*
+> 🛒 **[Get AkiGuard Pro](https://wildan17.gumroad.com/l/akiguard)** — one-click signed installer (no Terminal), **battery health** (health %, cycles, temperature) and **heat protection** (pause charging when the battery gets hot). Buying Pro supports development of the free version.
 
-> ⚠️ **Status: eksperimental.** Program ini menulis kunci SMC (System Management Controller) Mac Anda. Gunakan dengan risiko sendiri.
+> ⚠️ AkiGuard writes keys to your Mac's SMC (System Management Controller). Use at your own risk.
 
-## Fitur
-- **Batas charging** 50–100% (default 80%)
-- **Sailing** — charging nyala lagi hanya setelah baterai turun N% di bawah batas, supaya tidak bolak-balik
-- **Discharge sampai X%** — Mac memakai baterai walau charger terpasang, lalu ditahan di X%
-- **Auto-discharge** — kalau baterai di atas batas, diturunkan dulu
-- **Top up ke 100%** selama 2/4/8 jam
-- **Jadwal** — mis. Sen–Jum 05:30–07:30 isi penuh; setiap malam 22:00–05:30 tahan di 60%
-- **Pengaman** — charger dinyalakan lagi sebelum Mac sleep dan saat daemon berhenti; di bawah 10% charging selalu dibuka
+## Free vs Pro
 
-Arti ikon di menu bar: `⏸` charging ditahan · `⚡︎` charging · `↓` discharge · `⚠︎` daemon tidak jalan.
+| | Free (this repo) | [Pro](https://wildan17.gumroad.com/l/akiguard) |
+|---|---|---|
+| Charge limit 50–100%, sailing | ✅ | ✅ |
+| Run on battery while plugged in, auto-discharge | ✅ | ✅ |
+| Top up to 100% for 2/4/8 hours | ✅ | ✅ |
+| Schedules by time and day | ✅ | ✅ |
+| Menu bar app + `akiguard` CLI | ✅ | ✅ |
+| Install | Build from source in Terminal | **Signed, notarized one-click installer** |
+| Battery health: health %, cycle count, temperature | — | ✅ |
+| Heat protection: pause charging above 35–45 °C | — | ✅ |
+| Priority support | — | ✅ |
 
-## Kompatibilitas
+## Features
+- **Charge limit** 50–100% (default 80%)
+- **Sailing** — charging resumes only after the battery drops N% below the limit, so it doesn't flip on and off
+- **Discharge to X%** — run on battery while plugged in, then hold at X%
+- **Auto-discharge** — if the battery is above the limit, bring it down first
+- **Top up to 100%** for 2/4/8 hours
+- **Schedules** — e.g. Mon–Fri 05:30–07:30 charge to 100%; every night 22:00–05:30 hold at 60%
+- **Safety** — the adapter is switched back on before your Mac sleeps and when the service stops; below 10% charging is always allowed
 
-| MacBook | Batasi charging | Discharge saat dicolok | Batas berlaku saat Mac mati |
+Menu bar badges: `⏸` charging paused · `⚡︎` charging · `↓` discharging · `⚠︎` service not running.
+
+## Compatibility
+
+| MacBook | Limit charging | Discharge while plugged in | Limit kept while Mac is off |
 |---|---|---|---|
-| Intel 2016–2020 | Ya (`BCLM`, `CH0B`/`CH0C`) | Tergantung model (`CH0I`) | Ya (`BCLM`) |
-| Intel sebelum 2016 | Kemungkinan | Sering tidak | Tergantung model |
-| Apple Silicon (M1–M4) | Ya (`CH0B`/`CH0C` atau `CHTE`) | Ya (`CH0I` atau `CHIE`) | Tidak |
+| Intel 2016–2020 | Yes (`BCLM`, `CH0B`/`CH0C`) | Depends on model (`CH0I`) | Yes (`BCLM`) |
+| Intel before 2016 | Likely | Often not | Depends on model |
+| Apple Silicon (M1–M4) | Yes (`CH0B`/`CH0C` or `CHTE`) | Yes (`CH0I` or `CHIE`) | No |
 
-Butuh **macOS 11 (Big Sur)** atau lebih baru. Jalankan `akiguard keys` untuk melihat fitur yang didukung Mac Anda.
+Needs **macOS 11 (Big Sur)** or newer. Run `akiguard keys` to see what your Mac supports. Some recent firmware updates restrict what any charge limiter can do; `akiguard keys` tells you honestly.
 
-## Pasang
-Perlu Command Line Tools (`xcode-select --install`).
+## Install (free edition)
+Needs Command Line Tools (`xcode-select --install`).
 ```bash
 git clone https://github.com/wildanlsfs/akiguard.git
 cd akiguard
 ./install.sh
 ```
-Password admin diminta sekali untuk memasang daemon. Setelah selesai, ikon AkiGuard muncul di menu bar.
+You'll be asked for your admin password once. The AkiGuard icon then appears in the menu bar.
 
-Matikan **Optimized Battery Charging** (System Settings › Battery) agar tidak bentrok.
+Turn off **Optimized Battery Charging** (System Settings › Battery) so it doesn't conflict.
 
-## Perintah terminal
+## Terminal commands
 ```bash
-akiguard status       # baterai + status daemon
-akiguard keys         # fitur SMC yang didukung Mac ini
-sudo akiguard reset   # kembalikan semua ke normal
+akiguard status       # battery + service status
+akiguard keys         # SMC features this Mac supports
+sudo akiguard reset   # put everything back to normal
 ```
 - Log: `/Library/Logs/AkiGuard.log`
-- Konfigurasi: `/Library/Application Support/AkiGuard/akiguard.conf` (lihat contoh di [`config/akiguard.conf.default`](config/akiguard.conf.default))
+- Config: `/Library/Application Support/AkiGuard/akiguard.conf` (see [`config/akiguard.conf.default`](config/akiguard.conf.default))
 
-## Cara kerja
-- `akiguard daemon` (C, jalan sebagai root lewat launchd) membaca konfigurasi dan persentase baterai setiap 15 detik, lalu menulis kunci SMC yang tersedia.
-- `AkiGuard.app` (Swift, menu bar) hanya mengubah file konfigurasi, jadi tidak perlu password setiap kali mengubah pengaturan.
+## How it works
+- `akiguard daemon` (C, runs as root via launchd) reads the config and battery level every 15 seconds and writes the SMC keys your Mac supports.
+- `AkiGuard.app` (Swift, menu bar) only edits the config file, so you don't need a password each time you change a setting.
 
 ```
 src/
-  smc.c / smc.h        akses AppleSMC lewat IOKit
-  akiguard.c           daemon + CLI
-  AkiGuardMenu.swift   aplikasi menu bar
+  smc.c / smc.h      AppleSMC access via IOKit
+  akiguard.c         daemon + CLI
+  main.swift         menu bar app
+  pro_stub.c, ProStub.swift   placeholders for Pro-only features
 install.sh / uninstall.sh
 ```
 
-## Hapus
+## Uninstall
 ```bash
 ./uninstall.sh
 ```
-Daemon dihentikan dan semua kunci SMC dikembalikan normal (charging aktif, `BCLM` 100%).
+Stops the service and restores normal charging (charging on, `BCLM` 100%).
 
-## Lisensi
-MIT — lihat [LICENSE](LICENSE).
+## License
+MIT — see [LICENSE](LICENSE). Pro-only features are not part of this repository.
